@@ -1,0 +1,34 @@
+# ── Secrets & local config ────────────────────────────────────────────────────
+config.json          # contains API keys + computed ELO state — never commit
+
+# ── Data cache (large CSVs, rebuilt by option 1) ──────────────────────────────
+data/cache/
+
+# ── Trained model artifacts (rebuilt by option 2) ────────────────────────────
+models/saved/
+
+# ── CatBoost training artifacts ───────────────────────────────────────────────
+catboost_info/
+
+# ── Logs ──────────────────────────────────────────────────────────────────────
+logs/
+
+# ── Python ────────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Env / IDE ─────────────────────────────────────────────────────────────────
+.env
+.venv
+venv/
+env/
+.idea/
+.vscode/
+*.swp
+.DS_Store

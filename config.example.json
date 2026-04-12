@@ -1,0 +1,9 @@
+{
+  "odds_api_key": "YOUR_ODDS_API_KEY_HERE",
+  "seasons": [
+    "2017-18", "2018-19", "2019-20",
+    "2020-21", "2021-22", "2022-23", "2023-24"
+  ],
+  "best_model_name": "",
+  "best_model_params": {}
+}

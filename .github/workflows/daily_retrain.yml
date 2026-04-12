@@ -1,0 +1,44 @@
+name: Daily NBA Retrain
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # 12:00 AM ET = 5:00 AM UTC
+  workflow_dispatch:        # allow manual trigger from GitHub UI
+
+jobs:
+  retrain:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+        with:
+          lfs: true           # pull Git LFS objects (model + cache)
+          fetch-depth: 0      # full history so git push works
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch new games + retrain
+        run: python scheduler.py --headless
+
+      - name: Commit updated model + cache
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add models/saved/ data/cache/ config.json logs/ || true
+          git diff --staged --quiet || git commit -m "Auto-retrain: $(date +'%Y-%m-%d')"
+          git push
