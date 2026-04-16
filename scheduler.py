@@ -227,6 +227,9 @@ def run_retrain_headless(headless: bool = True) -> int:
             else:
                 _log("No backup found — cannot restore previous model.", "error")
 
+        # 6. Resolve pending predictions against new game results.
+        _resolve_pending_predictions(game_logs, _log)
+
         _log(
             f"Retrain complete. Games added: {n_new_games}, "
             f"Old acc: {old_accuracy:.4f}, New acc: {new_accuracy:.4f}"
@@ -238,6 +241,86 @@ def run_retrain_headless(headless: bool = True) -> int:
         import traceback
         logger.error(traceback.format_exc())
         return 1
+
+
+# ── Post-game feedback resolver ──────────────────────────────────────────────
+
+PENDING_PATH  = LOG_DIR / "pending_predictions.csv"
+ACCURACY_PATH = LOG_DIR / "prediction_accuracy.csv"
+
+
+def _resolve_pending_predictions(game_logs: "pd.DataFrame", log_fn) -> None:
+    """
+    Match pending predictions against real results from game_logs.
+    Appends resolved rows to prediction_accuracy.csv.
+    """
+    import pandas as pd
+
+    if not PENDING_PATH.exists():
+        return
+
+    try:
+        pending = pd.read_csv(PENDING_PATH)
+    except Exception:
+        return
+
+    unresolved = pending[pending["resolved"] == 0].copy()
+    if unresolved.empty:
+        return
+
+    # Build result lookup: (home_team, away_team, date) → home_won
+    results_lookup: dict[tuple, int] = {}
+    if "HOME_TEAM_NAME" in game_logs.columns and "AWAY_TEAM_NAME" in game_logs.columns:
+        from data.collector import build_matchup_dataframe
+        try:
+            mdf = build_matchup_dataframe(game_logs)
+            for _, row in mdf.iterrows():
+                key = (
+                    str(row["HOME_TEAM_NAME"]),
+                    str(row["AWAY_TEAM_NAME"]),
+                    str(pd.Timestamp(row["GAME_DATE"]).date()),
+                )
+                results_lookup[key] = int(row["home_win"])
+        except Exception:
+            pass
+
+    new_accuracy_rows: list[dict] = []
+    resolved_indices: list[int] = []
+
+    for idx, pred in unresolved.iterrows():
+        key = (str(pred["home_team"]), str(pred["away_team"]), str(pred["date"]))
+        if key not in results_lookup:
+            continue
+
+        actual_home_win = results_lookup[key]
+        correct = int(pred["predicted_home_win"]) == actual_home_win
+        new_accuracy_rows.append({
+            "date":               pred["date"],
+            "home_team":          pred["home_team"],
+            "away_team":          pred["away_team"],
+            "prob_home":          pred["prob_home"],
+            "predicted_home_win": pred["predicted_home_win"],
+            "actual_home_win":    actual_home_win,
+            "correct":            int(correct),
+            "confidence":         pred["confidence"],
+            "is_final_week":      pred.get("is_final_week", 0),
+            "end_of_season_risk": pred.get("end_of_season_risk", 0),
+        })
+        resolved_indices.append(idx)
+
+    if new_accuracy_rows:
+        acc_df = pd.DataFrame(new_accuracy_rows)
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        header = not ACCURACY_PATH.exists()
+        acc_df.to_csv(ACCURACY_PATH, mode="a", header=header, index=False)
+
+        # Mark resolved in pending file.
+        pending.loc[resolved_indices, "resolved"] = 1
+        pending.to_csv(PENDING_PATH, index=False)
+
+        n = len(new_accuracy_rows)
+        acc = sum(r["correct"] for r in new_accuracy_rows) / n
+        log_fn(f"Feedback loop: resolved {n} predictions. Accuracy: {acc:.1%}")
 
 
 # ── Schedule daemon ───────────────────────────────────────────────────────────

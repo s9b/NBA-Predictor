@@ -336,6 +336,16 @@ def build_feature_matrix(
         pass
 
     has_season = "SEASON" in matchup_df.columns
+
+    # Pre-compute per-season last game dates for is_final_week.
+    season_last_date: dict[str, pd.Timestamp] = {}
+    if has_season:
+        for s, grp in matchup_df.groupby("SEASON"):
+            season_last_date[str(s)] = pd.Timestamp(grp["GAME_DATE"].max())
+
+    # Historical NBA home win rate — explicit prior so the model never forgets it.
+    HOME_COURT_BASELINE = 0.59
+
     rows: list[dict] = []
 
     for _, game in matchup_df.iterrows():
@@ -384,6 +394,26 @@ def build_feature_matrix(
         feat["home_elo_recent"]   = game.get("home_elo_recent",  1500.0)
         feat["away_elo_recent"]   = game.get("away_elo_recent",  1500.0)
         feat["elo_recent_diff"]   = game.get("elo_recent_diff",  0.0)
+
+        # ── Home court prior ──────────────────────────────────────────────
+        feat["home_court_weight"] = HOME_COURT_BASELINE
+
+        # ── End-of-season flags ───────────────────────────────────────────
+        game_date_ts = pd.Timestamp(game_date)
+        if season and season in season_last_date:
+            days_to_end  = (season_last_date[season] - game_date_ts).days
+            is_final_week = 1 if 0 <= days_to_end <= 7 else 0
+        else:
+            is_final_week = 0
+        feat["is_final_week"] = is_final_week
+
+        # Clinched proxy: rolling 20-game win% > 0.58 → likely in playoff spot
+        home_clinched = 1 if h_stats.get("win_pct_20", 0.0) > 0.58 else 0
+        away_clinched = 1 if a_stats.get("win_pct_20", 0.0) > 0.58 else 0
+        feat["home_clinched"]  = home_clinched
+        feat["away_clinched"]  = away_clinched
+        # Unreliable game: end of season AND at least one team likely clinched
+        feat["end_of_season_risk"] = 1 if (is_final_week and (home_clinched or away_clinched)) else 0
 
         # Injuries
         if injuries_df is not None and not injuries_df.empty:

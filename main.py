@@ -572,6 +572,92 @@ def show_startup_banner() -> None:
     )
 
 
+# ── Option 8: Weekly accuracy trend ──────────────────────────────────────────
+
+def action_show_accuracy_trend() -> None:
+    from rich.table import Table
+    from rich import box as rbox
+
+    acc_path = Path(__file__).parent / "logs" / "prediction_accuracy.csv"
+    if not acc_path.exists():
+        console.print(
+            "[yellow]No prediction accuracy data yet.\n"
+            "Make predictions (option 4), then run the retrain daemon (option 6) "
+            "after games complete — it will resolve and log results automatically.[/yellow]"
+        )
+        return
+
+    try:
+        import pandas as pd
+        acc_df = pd.read_csv(acc_path, parse_dates=["date"])
+    except Exception as exc:
+        console.print(f"[red]Could not read accuracy log: {exc}[/red]")
+        return
+
+    if acc_df.empty:
+        console.print("[yellow]Accuracy log is empty — no resolved predictions yet.[/yellow]")
+        return
+
+    acc_df["week"] = acc_df["date"].dt.to_period("W").dt.start_time.dt.strftime("%Y-%m-%d")
+
+    table = Table(
+        title="[bold cyan]Weekly Prediction Accuracy[/bold cyan]",
+        box=rbox.ROUNDED, show_header=True, header_style="bold magenta",
+    )
+    table.add_column("Week of",     style="bold")
+    table.add_column("Games",       justify="right")
+    table.add_column("Correct",     justify="right")
+    table.add_column("Accuracy",    justify="right")
+    table.add_column("High-conf",   justify="right")
+    table.add_column("Trend",       justify="left")
+
+    weekly = acc_df.groupby("week")
+    all_accs = []
+    for week, grp in sorted(weekly, key=lambda x: x[0]):
+        n       = len(grp)
+        correct = int(grp["correct"].sum())
+        acc     = correct / n
+        all_accs.append(acc)
+        high    = grp[grp["confidence"] == "High"]
+        h_str   = f"{int(high['correct'].sum())}/{len(high)}" if len(high) else "—"
+        bar     = "█" * int(acc * 20)
+        col     = "bold green" if acc >= 0.60 else ("yellow" if acc >= 0.55 else "red")
+        # rolling arrow vs previous week
+        arrow   = ""
+        if len(all_accs) >= 2:
+            arrow = "[green]▲[/green]" if all_accs[-1] > all_accs[-2] else "[red]▼[/red]"
+        table.add_row(
+            week, str(n), str(correct),
+            f"[{col}]{acc*100:.1f}%[/]",
+            h_str,
+            f"{arrow} [{col}]{bar}[/]",
+        )
+
+    console.print(table)
+
+    # Summary line
+    overall_acc = float(acc_df["correct"].mean())
+    n_total     = len(acc_df)
+    high_conf   = acc_df[acc_df["confidence"] == "High"]
+    h_acc       = float(high_conf["correct"].mean()) if len(high_conf) else 0.0
+    console.print(
+        f"\n  [bold]Overall:[/bold] {overall_acc*100:.1f}% on {n_total} predictions   "
+        f"[bold]High-confidence:[/bold] {h_acc*100:.1f}% on {len(high_conf)} predictions"
+    )
+
+    # End-of-season vs normal breakdown
+    if "end_of_season_risk" in acc_df.columns:
+        risky   = acc_df[acc_df["end_of_season_risk"] == 1]
+        normal  = acc_df[acc_df["end_of_season_risk"] == 0]
+        if len(risky):
+            r_acc = float(risky["correct"].mean())
+            n_acc = float(normal["correct"].mean()) if len(normal) else 0.0
+            console.print(
+                f"  [bold]Normal games:[/bold] {n_acc*100:.1f}%   "
+                f"[bold yellow]End-of-season flagged:[/bold yellow] {r_acc*100:.1f}%"
+            )
+
+
 # ── Main menu ─────────────────────────────────────────────────────────────────
 
 def show_menu() -> None:
@@ -585,7 +671,8 @@ def show_menu() -> None:
     table.add_row("5", "Show current ELO rankings")
     table.add_row("6", "Start auto-retrain daemon (midnight ET)")
     table.add_row("7", "Backtest predictions (flat-bet simulation)")
-    table.add_row("8", "Exit")
+    table.add_row("8", "Weekly accuracy trend (post-game feedback)")
+    table.add_row("9", "Exit")
     console.print(table)
 
 
@@ -596,7 +683,7 @@ def main() -> None:
     while True:
         console.print()
         show_menu()
-        choice = Prompt.ask("\nSelect option", choices=["1","2","3","4","5","6","7","8"])
+        choice = Prompt.ask("\nSelect option", choices=["1","2","3","4","5","6","7","8","9"])
         console.print()
 
         if choice == "1":
@@ -614,6 +701,8 @@ def main() -> None:
         elif choice == "7":
             action_backtest()
         elif choice == "8":
+            action_show_accuracy_trend()
+        elif choice == "9":
             console.print("[cyan]Goodbye.[/cyan]")
             sys.exit(0)
 

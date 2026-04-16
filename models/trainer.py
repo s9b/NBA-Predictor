@@ -69,16 +69,32 @@ console = Console()
 
 # ── Base model definitions ────────────────────────────────────────────────────
 def _build_base_models() -> dict[str, object]:
+    # class_weight='balanced' corrects for the ~59/41 home/away prior so
+    # models don't learn to just predict away wins on uncertain games.
     models = {
-        "LogisticRegression": LogisticRegression(max_iter=1000, random_state=RANDOM_STATE),
-        "RandomForest":        RandomForestClassifier(n_estimators=300, random_state=RANDOM_STATE),
-        "GradientBoosting":    GradientBoostingClassifier(n_estimators=200, random_state=RANDOM_STATE),
+        "LogisticRegression": LogisticRegression(
+            max_iter=1000, random_state=RANDOM_STATE, class_weight="balanced",
+        ),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=300, random_state=RANDOM_STATE, class_weight="balanced",
+        ),
+        "GradientBoosting": GradientBoostingClassifier(
+            n_estimators=200, random_state=RANDOM_STATE,
+            # GradientBoosting has no class_weight; compensate via subsample.
+        ),
         "XGBoost": XGBClassifier(
             n_estimators=200, eval_metric="logloss",
             random_state=RANDOM_STATE, verbosity=0,
+            # scale_pos_weight set dynamically in training loop
         ),
-        "LightGBM": LGBMClassifier(n_estimators=200, verbose=-1, random_state=RANDOM_STATE),
-        "SVC":      SVC(probability=True, kernel="rbf", random_state=RANDOM_STATE),
+        "LightGBM": LGBMClassifier(
+            n_estimators=200, verbose=-1, random_state=RANDOM_STATE,
+            class_weight="balanced",
+        ),
+        "SVC": SVC(
+            probability=True, kernel="rbf", random_state=RANDOM_STATE,
+            class_weight="balanced",
+        ),
         "MLP": MLPClassifier(
             hidden_layer_sizes=(256, 128, 64),
             activation="relu",
@@ -86,12 +102,14 @@ def _build_base_models() -> dict[str, object]:
             early_stopping=True,
             validation_fraction=0.1,
             random_state=RANDOM_STATE,
+            # MLP has no class_weight; balanced prior comes from home_court_weight feature
         ),
     }
     if HAS_CATBOOST:
         models["CatBoost"] = CatBoostClassifier(
             iterations=500, learning_rate=0.05, depth=6,
             verbose=0, random_seed=RANDOM_STATE,
+            auto_class_weights="Balanced",
         )
     return models
 
@@ -239,12 +257,21 @@ def train_all_models(
         total_steps = len(_BASE_MODELS) + 1  # +1 for stacking
         task = progress.add_task("Training models…", total=total_steps)
 
+        # XGBoost scale_pos_weight: ratio of negative (away wins) to positive (home wins).
+        _n_away = int((y == 0).sum())
+        _n_home = int((y == 1).sum())
+        _xgb_spw = _n_away / _n_home if _n_home > 0 else 1.0
+
         for col_idx, (name, base_model) in enumerate(_BASE_MODELS.items()):
             progress.update(task, description=f"Training {name}…")
 
+            clf = clone(base_model)
+            if name == "XGBoost":
+                clf.set_params(scale_pos_weight=_xgb_spw)
+
             pipe = Pipeline([
                 ("scaler", RobustScaler()),
-                ("clf",    clone(base_model)),
+                ("clf",    clf),
             ])
             # Manual OOF loop: TimeSeriesSplit is not a partition so
             # cross_val_predict raises ValueError. Early rows never appear
@@ -262,7 +289,7 @@ def train_all_models(
             oof_probs_matrix[:, col_idx] = oof_probs[:, 1]
             oof_classes = (oof_probs[:, 1] >= 0.5).astype(int)
 
-            final = clone(base_model)
+            final = clone(clf)   # inherits scale_pos_weight for XGBoost
             final.fit(X_scaled_full, y)
 
             results[name] = {

@@ -29,12 +29,44 @@ LOW_CONF_THRESHOLD  = 0.10   # |prob - 0.5| < 10% → Low
 HIGH_CONF_THRESHOLD = 0.20   # |prob - 0.5| > 20% → High
 
 TOP_SHAP = 5
+LOG_DIR  = Path(__file__).parent.parent / "logs"
+PENDING_PREDS_PATH = LOG_DIR / "pending_predictions.csv"
 
 console = Console()
 logger = logging.getLogger(__name__)
 
 # Module-level rolling-stats cache keyed by number of rows in game_logs.
 _rolling_cache: dict[int, dict] = {}
+
+
+# ── Prediction logger (feed for post-game feedback loop) ─────────────────────
+
+def _log_prediction(
+    home_team: str,
+    away_team: str,
+    prob_home: float,
+    confidence: str,
+    is_final_week: int,
+    end_of_season_risk: int,
+) -> None:
+    """Append today's prediction to pending_predictions.csv for later resolution."""
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        row = pd.DataFrame([{
+            "date":               datetime.date.today().isoformat(),
+            "home_team":          home_team,
+            "away_team":          away_team,
+            "prob_home":          round(prob_home, 4),
+            "predicted_home_win": 1 if prob_home >= 0.5 else 0,
+            "confidence":         confidence,
+            "is_final_week":      is_final_week,
+            "end_of_season_risk": end_of_season_risk,
+            "resolved":           0,
+        }])
+        header = not PENDING_PREDS_PATH.exists()
+        row.to_csv(PENDING_PREDS_PATH, mode="a", header=header, index=False)
+    except Exception as exc:
+        logger.debug("Could not log prediction: %s", exc)
 
 
 # ── Schedule fetcher ──────────────────────────────────────────────────────────
@@ -326,12 +358,27 @@ def predict_game(
         home_team, away_team, game_logs, matchup_df, feature_cols, injuries_df
     )
 
-    X_scaled    = scaler.transform(X)
-    prob_home   = float(model.predict_proba(X_scaled)[0][1])
-    prob_away   = 1.0 - prob_home
+    X_scaled  = scaler.transform(X)
+    prob_home = float(model.predict_proba(X_scaled)[0][1])
+
+    # ── Home court bias constraint ────────────────────────────────────────
+    # If the model is too uncertain (45-55%), default to home team.
+    # Historical NBA home win rate is ~59% — a coin-flip should lean home.
+    if 0.45 <= prob_home <= 0.55:
+        prob_home = 0.55
+
+    prob_away = 1.0 - prob_home
+
+    # ── End-of-season flags ───────────────────────────────────────────────
+    is_final_week     = int(X["is_final_week"].iloc[0])     if "is_final_week"     in X.columns else 0
+    end_of_season_risk = int(X["end_of_season_risk"].iloc[0]) if "end_of_season_risk" in X.columns else 0
 
     confidence    = _confidence_label(prob_home)
     contributions = _get_shap_contributions(model, X_scaled, feature_cols)
+
+    # ── Log prediction for post-game feedback loop ────────────────────────
+    _log_prediction(home_team, away_team, prob_home, confidence,
+                    is_final_week, end_of_season_risk)
 
     # Injury warnings
     injury_warnings: list[str] = []
@@ -383,6 +430,16 @@ def predict_game(
         for w in injury_warnings:
             console.print(f"  {w}")
 
+        if end_of_season_risk:
+            console.print(
+                "  [bold yellow]⚠  CAUTION: End of season — rotations unreliable. "
+                "Stats may not reflect actual game plan.[/bold yellow]"
+            )
+        elif is_final_week:
+            console.print(
+                "  [yellow]ℹ  Final week of regular season — watch for rest decisions.[/yellow]"
+            )
+
         if contributions:
             console.print("\n[bold]Key Factors (top 5 contributions):[/bold]")
             for feat, val in contributions:
@@ -390,11 +447,13 @@ def predict_game(
                 console.print(f"  {direction} [cyan]{feat}[/cyan]  ({val:+.4f})")
 
     return {
-        "home_team":      home_team,
-        "away_team":      away_team,
-        "home_win_prob":  prob_home,
-        "away_win_prob":  prob_away,
-        "confidence":     confidence,
-        "contributions":  contributions,
-        "injury_warnings": injury_warnings,
+        "home_team":         home_team,
+        "away_team":         away_team,
+        "home_win_prob":     prob_home,
+        "away_win_prob":     prob_away,
+        "confidence":        confidence,
+        "contributions":     contributions,
+        "injury_warnings":   injury_warnings,
+        "is_final_week":     is_final_week,
+        "end_of_season_risk": end_of_season_risk,
     }
